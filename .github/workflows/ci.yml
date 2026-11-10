@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Baseline (Caddy from go.mod)
+        run: go vet ./... && go test ./...
+
+      - name: Latest Caddy v2
+        # The newest release may need a newer Go toolchain and raises the go
+        # directive; runner-only state, never committed.
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go get github.com/caddyserver/caddy/v2@latest
+          go mod tidy
+          version="$(go list -m -f '{{.Version}}' github.com/caddyserver/caddy/v2)"
+          echo "Caddy $version"
+          [[ $version =~ ^v2\.[0-9]+\.[0-9]+ ]] || exit 1
+          go test ./...
