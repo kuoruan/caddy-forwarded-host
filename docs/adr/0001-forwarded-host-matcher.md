@@ -36,7 +36,7 @@ By default users declare the boundary once, in the global options, and `reverse_
 }
 ```
 
-Provider ranges can come from `http.ip_sources.*` modules (e.g. `http.ip_sources.cloudflare`), which are extra build dependencies and are only mentioned in the docs as optional.
+Provider ranges can come from `http.ip_sources.*` modules (for example `http.ip_sources.cloudflare`), at the cost of an extra build dependency.
 
 ### 3. One effective host, not an OR of two sources
 
@@ -79,7 +79,7 @@ A "valid authority" is an input boundary only, decidable item by item:
 
 No DNS character-set validation, no request-side IDNA, no trailing-dot normalization. Hostname matching follows `MatchHost` semantics: it normalizes IDNA on the configuration side only (`idna.ToASCII` uses `idna.Punycode`, which rejects little beyond malformed `xn--` payloads), which is not the same as validating DNS names, and this module promises nothing beyond it.
 
-Placeholders: `MatchHost` calls `repl.ReplaceAll(host, "")` before testing for `*` (`modules/caddyhttp/matchers.go`), and the replacer is bound to the original request. A config entry built from a request-derived placeholder (such as `forwarded_host {http.request.header.X-Tenant-Host}`) therefore lets a `*` from the request reach the wildcard branch, bypassing both the request-side `*` rejection and the Provision check; `{http.request.host}` yields the inbound `Host`, not the effective host. Such usage is unsupported and unhardened: the docs record the hazard, and no interception is added.
+Placeholders: `MatchHost` calls `repl.ReplaceAll(host, "")` before testing for `*` (`modules/caddyhttp/matchers.go`), and the replacer is bound to the original request. A config entry built from a request-derived placeholder (such as `forwarded_host {http.request.header.X-Tenant-Host}`) therefore lets a `*` from the request reach the wildcard branch, bypassing both the request-side `*` rejection and the Provision check; `{http.request.host}` yields the inbound `Host`, not the effective host. Such usage is unsupported and unhardened; no interception is added.
 
 Configuration-side wildcards and placeholders come straight from `MatchHost`: `forwarded_host *.example.com` matches `app.example.com` (`*` covers exactly one label), and `{...}` placeholders work. The request side rejects wildcards, which is policy rather than syntax (RFC 3986 `reg-name` allows `*`): a forwarded header carries a concrete host for this request, not a pattern. Without the rejection, `MatchHost` skipping `*` labels would let the literal `*.example.com` match the `*.example.com` entry.
 
@@ -134,10 +134,9 @@ The cost is giving up "delegate to `MatchHost.UnmarshalCaddyfile` in one line" a
 
 Without trusted proxies configured, the matcher degrades to the built-in `host` behavior; that is a legitimate use, not a configuration error, and Provision cannot reliably learn the actual server's trust configuration, so any warning would be a false positive. Observability belongs to Caddy's access logs.
 
-The cost must be stated: "trusted peer but invalid XFH" is the hardest path to diagnose. It does not fall back; it does not match, which looks like a silent
-404. Debugging relies on access logs (the request headers are still logged), not on module logging.
+A trusted peer with an invalid XFH is hard to diagnose: the matcher does not fall back, so the request simply does not match and looks like a plain 404. Debugging relies on access logs (the request headers are still logged), not on module logging.
 
-Rewriting the backend `Host` is not automatic, but the matcher does publish an output: on a successful match it stores the authority it used in the request variable `forwarded_host`, and the config writes it explicitly with `header_up Host {http.vars.forwarded_host}` (see §9). Using `header_up Host {http.request.header.X-Forwarded-Host}` instead is wrong: empty on direct requests, garbage when multi-valued, and it bypasses the trust decision.
+Rewriting the backend `Host` is not automatic, but on a successful match the matcher stores the authority it used in the request variable `forwarded_host`, and the config writes it explicitly with `header_up Host {http.vars.forwarded_host}` (see §9). Using `header_up Host {http.request.header.X-Forwarded-Host}` instead is wrong: empty on direct requests, garbage when multi-valued, and it bypasses the trust decision.
 
 ### 8. `require_header` (default `false`)
 
@@ -182,7 +181,7 @@ Output contract:
 - On failure, no invalid value is written and a value from an earlier successful match is not cleared.
 - `r.Host`, headers, URL and global state are untouched; only request-scoped variables are written.
 
-Scope (this must be documented, so nobody mistakes it for a global placeholder):
+Scope (request state, not a global placeholder):
 
 - It is meaningful only inside a handle that this matcher matched. In a catch-all route, in a purely `not` route, or where the matcher never ran, it is empty or still holds the result of an earlier match. Passing an empty value to `header_up Host` leaves `r.Host` empty, after which Go falls back to `r.URL.Host` (the upstream address), so the backend receives something like `127.0.0.1:8081`, not an empty string and not the public hostname.
 - It is an echo of the routing input, not an authorization credential.
@@ -208,13 +207,13 @@ if trusted || m.TrustAnyPeer {
 
 It does not write the `trusted_proxy` variable back, does not change `client_ip`, and does not change what `reverse_proxy` does with `X-Forwarded-*`. The shared variables stay exactly as `determineTrustedProxy` computed them (in `modules/caddyhttp/server.go`, called from `prepareRequest` there); only this matcher's reading of them differs.
 
-It is an exemption, not a second trust configuration: no ranges, no range sources, no per-site lists to keep in sync with the server. This separates it from the matcher-level `trusted_proxies` field rejected in Considered Options. It does accept a deliberate local divergence: with the flag on, a request the server judged untrusted still routes on XFH here, while `reverse_proxy` and `client_ip` keep treating that same request as untrusted. That divergence is a matcher-local policy change, it is confined to this matcher instance, and the documentation states it explicitly.
+It is an exemption, not a second trust configuration: no ranges, no range sources, no per-site lists to keep in sync with the server. This separates it from the matcher-level `trusted_proxies` field rejected in Considered Options. It does accept a deliberate local divergence: with the flag on, a request the server judged untrusted still routes on XFH here, while `reverse_proxy` and `client_ip` keep treating that same request as untrusted. That divergence is a matcher-local policy change, it is confined to this matcher instance, and it is deliberate.
 
 Nothing else about matching changes. Authority validation (space, control characters, `*`, `@`, `/`, `?`, `#`), rightmost-item selection, no fallback when the selected value is invalid, wildcard rules and port retention all behave as described in §4 and §5. The flag only decides which requests reach that code.
 
 Composition with `require_header` (§8): with the flag off, an untrusted peer never enters the XFH path; with the flag on, the peer-trust requirement is satisfied by every peer, so `require_header` reduces to "X-Forwarded-Host must be present and valid". A missing header still falls back to `Host` in default mode and is still rejected under `require_header`.
 
-The risk must be documented alongside the option, not in a footnote. With the flag on, any client that can open a connection and send `X-Forwarded-Host` selects among the routes this matcher allows; the authority checks only reject malformed values. Reachability alone is not a sufficient condition: a listener on a private interface remains reachable by every other host on that network. The flag is safe only when ingress is restricted to the proxy by something a client cannot forge (firewall rules, socket file permissions, an authenticating sidecar) and the proxy overwrites any client-supplied XFH instead of passing it through. A proxy range that changes frequently is an argument for convenience, not for security. The option remains a deployment workaround, off by default, with configuring the real ranges as the recommendation.
+With the flag on, any client that can open a connection and send `X-Forwarded-Host` selects among the routes this matcher allows; the authority checks only reject malformed values. Reachability alone is not a sufficient condition: a listener on a private interface remains reachable by every other host on that network. The flag is safe only when ingress is restricted to the proxy by something a client cannot forge (firewall rules, socket file permissions, an authenticating sidecar) and the proxy overwrites any client-supplied XFH instead of passing it through. A proxy range that changes frequently is an argument for convenience, not for security. The option remains a deployment workaround, off by default, with configuring the real ranges as the recommendation.
 
 The name follows Caddy's own `trusted_proxies_unix`, which also names the additional source that gets trusted rather than calling itself `insecure`. `insecure` was rejected here because inside this matcher it would not say what is insecure, and it could be read as disabling authority validation, which always stays on. `skip_trust_check` was rejected because it describes the mechanism rather than the resulting policy, and because the check itself lives in Caddy core; this module only ignores its result.
 
@@ -231,7 +230,7 @@ That is its role as a matcher: fine-grained routing inside a site block, not a s
 ## Considered Options
 
 - A handler that rewrites `r.Host`: makes the built-in `host`, `{host}` and `reverse_proxy`'s default Host all correct, but the site block has already been chosen, so it only works in the subset where the site was already correct, and it invites the false impression that it can select a site. Users would also have to deal with directive ordering. Rejected.
-- A matcher-level `trusted_proxies` field: self-contained and allows per-site trust ranges, but it forks from the server-level verdict: the same request is trusted to `reverse_proxy` and untrusted to the matcher, which is extremely hard to debug. Rejected. The `trust_any_peer` flag in §10 is not this design: it holds no ranges and no second policy list, and it declines to consult the shared verdict for one matcher instance, accepting the divergence §10 describes.
+- A matcher-level `trusted_proxies` field: self-contained and allows per-site trust ranges, but it forks from the server-level verdict: the same request is trusted to `reverse_proxy` and untrusted to the matcher, which is hard to debug. Rejected. The `trust_any_peer` flag in §10 is not this design: it holds no ranges and no second policy list, and it declines to consult the shared verdict for one matcher instance, accepting the divergence §10 describes.
 - Dual-source OR semantics (the CEL-equivalent status quo): no defensible priority. Rejected.
 - Rejecting the whole header when XFH is multi-valued: more conservative, but it breaks the standard append chain, and the Worker's overwrite form only ever produces a single value. Rejected.
 - Naming it `effective_host`: more accurate, but people searching for `X-Forwarded-Host` would not find it, and a registered module ID is irreversible; discoverability wins. Rejected.
@@ -246,9 +245,9 @@ That is its role as a matcher: fine-grained routing inside a site block, not a s
 
 - Baseline dependency is Caddy v2.10.2, verified up to v2.11.9 (the newest v2 at the time); the implementation uses `RequestMatcherWithError`. The APIs required are identical on both versions, so compatibility is not bought by lowering the implementation.
 - `trusted_proxies` is a server-level setting that applies to the whole server and is no longer a private matcher setting.
-- Trusting Cloudflare's ranges only identifies "from Cloudflare's network", not "from the operator's own Worker"; other tenants on those ranges are trusted too, and `Host` is still chosen by the client. This module is therefore not an authorization mechanism: origin firewalls and authentication remain necessary, and the documentation must state this.
+- Trusting Cloudflare's ranges only identifies "from Cloudflare's network", not "from the operator's own Worker"; other tenants on those ranges are trusted too, and `Host` is still chosen by the client. This module is therefore not an authorization mechanism: origin firewalls and authentication remain necessary.
 - The definition of effective host (port stripping, case insensitivity, wildcard rules) always follows upstream `MatchHost`; upstream changes will show up here directly, which is intentional.
-- Only `X-Forwarded-Host` is handled: `X-Forwarded-For` belongs to `trusted_proxies` / `client_ip`, and `X-Forwarded-Proto` is irrelevant to host matching and does not change the actual TLS/SNI/certificate selection. The docs must not claim "the original protocol has been restored".
+- Only `X-Forwarded-Host` is handled: `X-Forwarded-For` belongs to `trusted_proxies` / `client_ip`, and `X-Forwarded-Proto` is irrelevant to host matching and does not change the actual TLS/SNI/certificate selection or restore the original protocol.
 - Routing by XFH while the response cache key stays `Host` + URL means the same URL can hit different backends depending on XFH; shared caches (Cloudflare cache, a future cache handler) need `Vary: X-Forwarded-Host` or no caching.
 - `require_header` does not protect against "a trusted proxy passes the client's own XFH through": it only requires a trusted peer and a valid header. The proxy must overwrite XFH or append correctly.
 - `trust_any_peer` is the one setting that lets this module route on a header written by any client. It is off by default and must carry its two conditions wherever it appears: ingress restricted to the proxy by something a client cannot forge, and a proxy that overwrites client-supplied `X-Forwarded-Host`. Users who only need "trust the proxy" should configure its ranges, not this flag.

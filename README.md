@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Caddy request matcher that routes by the effective host of a request: by default the `X-Forwarded-Host` value when the request comes from a trusted proxy, otherwise the inbound `Host`. The opt-in `trust_any_peer` accepts the header from any peer.
 
-Useful when a CDN or edge proxy (Cloudflare Workers, a load balancer, another Caddy) forwards requests for many public hostnames to a single origin hostname, and a host split is required on the public hostname without trusting client-supplied values.
+Useful when a CDN or edge proxy (Cloudflare Workers, a load balancer, another Caddy) forwards requests for many public hostnames to a single origin hostname, and routing has to follow the public hostname without trusting values a client can set.
 
 ## Relation to the built-in `header` matcher
 
@@ -191,7 +191,7 @@ origin.example.com {
 }
 ```
 
-The split follows the trustworthy value, so blue/green or per-application routing requires swapping a `handle` block rather than changing certificates and site addresses.
+The split follows the value that passed the trust check, so blue/green or per-application routing requires swapping a `handle` block rather than changing certificates and site addresses.
 
 ### Direct and proxied traffic in one site block
 
@@ -221,7 +221,7 @@ a.example.com, b.example.com {
 }
 ```
 
-If no logic depends on which hostname was used, a site-address list is sufficient. This matcher adds a trust dependency and does not enable direct access to a third hostname, because it cannot change site selection.
+If no logic depends on which hostname was used, a site-address list is sufficient. This matcher adds a dependency on `trusted_proxies` and does not enable direct access to a third hostname, because it cannot change site selection.
 
 ## Boundaries
 
@@ -232,11 +232,11 @@ If no logic depends on which hostname was used, a site-address list is sufficien
 - Only `X-Forwarded-Host` is handled. `X-Forwarded-For` belongs to `trusted_proxies` / `client_ip`; `X-Forwarded-Proto` does not affect host matching and does not restore TLS/SNI.
 - Placeholders in the host list are intended for static sources (environment or configuration). A request-derived placeholder such as `forwarded_host {http.request.header.X-Tenant-Host}` lets the request inject a wildcard into the matcher; that usage is unsupported and unhardened.
 - A trailing-dot FQDN (`app.example.com.`) passes validation but does not match `app.example.com`, and does not fall back to `Host`.
-- Static hosting/caching keys on `Host` + URL, not on `X-Forwarded-Host`: if responses are shared between hosts, send `Vary: X-Forwarded-Host` or disable caching.
+- Static file servers and shared caches key on `Host` + URL, not on `X-Forwarded-Host`: if responses are shared between hosts, send `Vary: X-Forwarded-Host` or disable caching.
 
 ## Troubleshooting
 
-A trusted peer whose `X-Forwarded-Host` is present but invalid is the hardest case to diagnose: the matcher does not fall back, so the request appears as an ordinary 404 and the module logs nothing. To narrow it down:
+A trusted peer whose `X-Forwarded-Host` is present but invalid is hard to diagnose: the matcher does not fall back, so the request appears as an ordinary 404 and the module logs nothing. To narrow it down:
 
 1. Send the request with an explicit header from an address inside `trusted_proxies` (for local testing, temporarily add the address used by the test client): `curl -H 'Host: origin.example.com' -H 'X-Forwarded-Host: app.example.com' https://origin.example.com/`
 2. Check Caddy's access log. Request headers are logged there, and each entry records the site block that handled the request.

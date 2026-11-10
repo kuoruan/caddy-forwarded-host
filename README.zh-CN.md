@@ -4,7 +4,7 @@
 
 一个 Caddy 请求匹配器，按请求的有效主机路由：默认在请求来自可信代理时用 `X-Forwarded-Host`，否则用入站 `Host`；可选开启的 `trust_any_peer` 允许接受任意来源的这个头。
 
-适用于 CDN 或边缘代理（Cloudflare Workers、负载均衡、另一个 Caddy）把许多公网域名转发到同一个源站域名，而你想按公网域名做主机分流、又不让任何客户端伪造它的场景。
+适用于 CDN 或边缘代理（Cloudflare Workers、负载均衡、另一个 Caddy）把许多公网域名转发到同一个源站域名，而需要按公网域名分流、又不采信客户端可伪造的值的场景。
 
 ## 与内置 `header` 匹配器的关系
 
@@ -191,7 +191,7 @@ origin.example.com {
 }
 ```
 
-分流依据是可信的值，灰度、蓝绿或按应用分流只需替换 `handle` 块，无需改动证书和站点地址。
+分流依据是通过信任检查的值，灰度、蓝绿或按应用分流只需替换 `handle` 块，无需改动证书和站点地址。
 
 ### 同一站点块里直连与代理共存
 
@@ -221,7 +221,7 @@ a.example.com, b.example.com {
 }
 ```
 
-如果没有任何逻辑依赖实际使用的域名，站点地址列表即可满足。引入本模块会增加一条隐性信任依赖，且无法让第三个域名支持直连，因为它无法改变站点选择。
+如果没有任何逻辑依赖实际使用的域名，站点地址列表即可满足。引入本模块会增加一条对 `trusted_proxies` 的隐性依赖，且无法让第三个域名支持直连，因为它无法改变站点选择。
 
 ## 边界
 
@@ -232,11 +232,11 @@ a.example.com, b.example.com {
 - 只处理 `X-Forwarded-Host`。`X-Forwarded-For` 归 `trusted_proxies` / `client_ip`；`X-Forwarded-Proto` 与主机匹配无关，也不会还原 TLS/SNI。
 - 主机名里的占位符只适用于静态来源（环境变量或配置文件）。请求派生的占位符，例如 `forwarded_host {http.request.header.X-Tenant-Host}`，会让请求把通配符注入匹配器；该用法不受支持，也未做加固。
 - 带尾点的 FQDN（`app.example.com.`）能通过校验，但不命中 `app.example.com`，也不会回退 `Host`。
-- 静态托管/缓存的键是 `Host` + URL，而不是 `X-Forwarded-Host`：如果响应会被多个主机共享，需要发 `Vary: X-Forwarded-Host` 或关闭缓存。
+- 静态文件服务与共享缓存的键是 `Host` + URL，而不是 `X-Forwarded-Host`：如果响应会被多个主机共享，需要发 `Vary: X-Forwarded-Host` 或关闭缓存。
 
 ## 排查
 
-「对端可信、`X-Forwarded-Host` 存在但无效」是最难发现的情况：匹配器不回退，请求表现为普通 404，模块本身不输出任何日志。缩小范围的步骤：
+「对端可信、`X-Forwarded-Host` 存在但无效」很难发现：匹配器不回退，请求表现为普通 404，模块本身不输出任何日志。缩小范围的步骤：
 
 1. 从 `trusted_proxies` 内的地址带上头发一次请求（本地测试时把自己的地址临时加进去）：`curl -H 'Host: origin.example.com' -H 'X-Forwarded-Host: app.example.com' https://origin.example.com/`
 2. 看 Caddy 的访问日志。请求头会记录在里面，每条日志还记录了处理该请求的站点块。

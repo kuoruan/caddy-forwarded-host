@@ -1,7 +1,7 @@
-// Package forwardedhost provides a Caddy request matcher that routes on the
-// effective host of a request: the last value of X-Forwarded-Host when the
-// request comes from a trusted proxy, or from any peer when TrustAnyPeer is set,
-// otherwise the inbound Host.
+// Package forwardedhost provides a Caddy request matcher that routes by the
+// effective host of a request: the rightmost value of the last X-Forwarded-Host
+// field when the request comes from a trusted proxy, or from any peer when
+// TrustAnyPeer is set, otherwise the inbound Host.
 package forwardedhost
 
 import (
@@ -53,7 +53,7 @@ type MatchForwardedHost struct {
 	//
 	// Any client that can connect can then choose its route by writing the header.
 	// Only enable it when ingress is restricted to the proxy by something a client
-	// cannot forge (firewall rules, socket permissions, an authenticating proxy)
+	// cannot forge (firewall rules, socket permissions, an authenticating sidecar)
 	// and the proxy overwrites client-supplied X-Forwarded-Host. Configure real
 	// proxy ranges instead whenever that is possible.
 	TrustAnyPeer bool `json:"trust_any_peer,omitempty"`

@@ -9,7 +9,7 @@ A Caddy request matcher, `http.matchers.forwarded_host` (Caddyfile name `forward
 ```
 forwardedhost.go       module, effective-host selection, authority validation
 caddyfile.go           UnmarshalCaddyfile
-*_test.go              table tests; integration_test.go runs a real in-process Caddy
+*_test.go              table tests and benchmarks; integration_test.go runs a real in-process Caddy
 docs/adr/              decision records (the only place design is argued)
 ```
 
@@ -49,13 +49,13 @@ go list -m -f '{{.Version}}' github.com/caddyserver/caddy/v2   # v2.11.9 when ve
 GOTOOLCHAIN=auto go test ./...
 ```
 
-The integration test starts a real Caddy through `caddytest`, so `prepareRequest` runs before matching: `:9081` carries `trusted_proxies static 127.0.0.1/32`, `:9082` carries none, and both are exercised in one run. The `-short` skip comes from `caddytest` itself, not from this repository.
+The integration test starts a real Caddy through `caddytest`, so `prepareRequest` runs before matching: `:9081` carries `trusted_proxies static 127.0.0.1/32`, `:9082` carries none, and `:9083` sets `trust_any_peer` with no `trusted_proxies`. All three are exercised in one run. The `-short` skip comes from `caddytest` itself, not from this repository.
 
 ## Traps
 
 - Hosts must be on one line. Repeated matcher lines merge only inside one named-matcher block (Caddy concatenates same-name matchers into a single token stream and `RemainingArgs` stops at end-of-line); on one line the module name parses as a host, and defining the same `@name` twice is a Caddyfile error. Pinned by adapter-level tests; the user-facing rule is documented in the README.
 - The host handed to `MatchHost` is lowercased first. In Caddy v2.10.2 a list over 100 entries is matched by a byte-wise exact lookup and the fallback loop stops at the first non-fuzzy entry, so exact entries bypass the case-insensitive comparison. Lowercasing buys case-insensitive matching for lowercase config entries; the trade-off is that on v2.10.2 an entry containing uppercase cannot match in such a list, even in identical case. v2.11.9 lowercases the request host and normalizes exact entries in `Provision`, so both forms match there. Pinned by `TestLargeListMatchesHostDelegation`. Only the matching value is lowercased; the published authority keeps its case.
-- The shallow request copy does not escape, so it costs no allocation, only the struct copy. Do not replace it with a temporary mutation of `r.Host`: the no-mutation invariant is what lets callers keep reading the original request. `benchmark_test.go` measures the hot path, including the upstream `MatchHost` baseline this module delegates to.
+- The shallow request copy does not escape, so it costs no allocation, only the struct copy. Do not replace it with a temporary mutation of `r.Host`; not modifying the request is part of the contract (ADR §5). `benchmark_test.go` measures the hot path, including the upstream `MatchHost` baseline this module delegates to.
 - Config entries must not carry a port: `MatchHost` strips ports on the request side only, so such an entry parses and never matches (pinned by a test).
 - Request-derived placeholders in the config are unsupported and unhardened: the replacer runs before the `*` check, so a request can inject a wildcard.
 - User-facing behavior belongs in the README, internals and traps here, and argument in the ADR.
