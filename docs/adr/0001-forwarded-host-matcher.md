@@ -6,7 +6,7 @@ Status: accepted (2026-11-10)
 
 The origin sits behind a trusted proxy (a Cloudflare Worker) that forcibly rewrites `Host`, so the original hostname can only be recovered from `X-Forwarded-Host` (XFH). The existing workaround is a CEL expression, `host('app.example.com') || header({'X-Forwarded-Host': 'app.example.com'})`: the hostname is written twice, and the client-controlled header is believed unconditionally.
 
-This repository provides a Caddy request matcher that routes by effective host. An earlier internal proposal for this module was superseded by this record in several places, listed under "Differences from the earlier proposal" below.
+This repository provides a Caddy request matcher that routes by effective host.
 
 ## Decision
 
@@ -243,8 +243,8 @@ That is its role as a matcher: fine-grained routing inside a site block, not a s
 
 ## Consequences
 
-- Baseline dependency is Caddy v2.10.2, verified up to v2.11.9 (the newest v2 at the time); the implementation uses `RequestMatcherWithError`. The APIs required are identical on both versions, so compatibility is not bought by lowering the implementation.
-- `trusted_proxies` is a server-level setting that applies to the whole server and is no longer a private matcher setting.
+- Baseline dependency is Caddy v2.10.2, verified up to v2.11.9 (the newest v2 at the time); the implementation reports errors through `RequestMatcherWithError` and keeps a `Match` wrapper for the deprecated `RequestMatcher`, as upstream asks matcher modules to do. The APIs required are identical on both versions, so compatibility is not bought by lowering the implementation.
+- `trusted_proxies` is a server-level setting that applies to the whole server; this module adds no matcher-level trust list (see Considered Options).
 - Trusting Cloudflare's ranges only identifies "from Cloudflare's network", not "from the operator's own Worker"; other tenants on those ranges are trusted too, and `Host` is still chosen by the client. This module is therefore not an authorization mechanism: origin firewalls and authentication remain necessary.
 - The definition of effective host (port stripping, case insensitivity, wildcard rules) always follows upstream `MatchHost`; upstream changes will show up here directly, which is intentional.
 - Only `X-Forwarded-Host` is handled: `X-Forwarded-For` belongs to `trusted_proxies` / `client_ip`, and `X-Forwarded-Proto` is irrelevant to host matching and does not change the actual TLS/SNI/certificate selection or restore the original protocol.
@@ -277,7 +277,7 @@ Verification boundary: everything above is read-only source and documentation re
 
 ### Version policy: baseline dependency v2.10.2, verified through v2.11.9
 
-`go.mod` requires `github.com/caddyserver/caddy/v2 v2.10.2` and the implementation uses `RequestMatcherWithError`. The baseline is 2.10.2 rather than the latest v2.11.9 because of Go module resolution: requiring v2.11.9 would make MVS upgrade a user's explicit Caddy 2.10 to 2.11.9, at which point claiming 2.10 support would be false. The code is identical on both versions and gains no version branches.
+`go.mod` requires `github.com/caddyserver/caddy/v2 v2.10.2` and the implementation implements both matcher interfaces, reporting errors through `RequestMatcherWithError`. The baseline is 2.10.2 rather than the latest v2.11.9 because of Go module resolution: requiring v2.11.9 would make MVS upgrade a user's explicit Caddy 2.10 to 2.11.9, at which point claiming 2.10 support would be false. The code is identical on both versions and gains no version branches.
 
 Per-tag source comparison (`https://raw.githubusercontent.com/caddyserver/caddy/<tag>/...`):
 
@@ -288,13 +288,10 @@ Per-tag source comparison (`https://raw.githubusercontent.com/caddyserver/caddy/
 | `trusted_proxy` variable written to the request context before routing | no | yes | yes | yes | yes |
 | `caddyhttp.GetVar` | yes | yes | yes | yes | yes |
 | `MatchHost.MatchWithError` / `RequestMatcherWithError` | no | no | yes | yes | yes |
+| `MatchHost.Match` / `RequestMatcher` | yes | yes | yes | yes | yes |
 
 The `go` directives of both versions (read from each tag's `go.mod`): v2.10.2 is `go 1.25`, v2.11.9 is `go 1.26.0`. This module therefore declares `go 1.25.0`; building it against 2.11.9 is handled by the consumer's toolchain and needs no change here. Upgrading to a newer release raises the `go` directive to whatever that release requires and needs `GOTOOLCHAIN=auto`; such a change is temporary and must not be committed.
 
-Conclusion: the `trusted_proxy` variable is available from v2.6.3 and `MatchWithError` from v2.9.0; 2.10.2 and 2.11.9 differ in nothing this module needs. Reaching back to 2.6 through 2.8 would require switching to `Match` and giving up error reporting, so it is not supported.
+Conclusion: the `trusted_proxy` variable is available from v2.6.3 and `MatchWithError` from v2.9.0; 2.10.2 and 2.11.9 differ in nothing this module needs. On 2.6 through 2.8 the module would still match through `Match`, but `MatchWithError` is absent there, so an error from the delegated matcher could not be reported; that range is not supported.
 
 `determineTrustedProxy` returns a single `bool` in v2.6.3 (v2.10+ returns `(bool, string)`), but the variable name and type are the same, so `GetVar(...).(bool)` works on both.
-
-## Differences from the earlier proposal
-
-The earlier internal proposal was superseded in these places: a module-level `trusted_proxies` field; picking the rightmost non-empty value with fallback to `r.Host`; debug logging and a startup warning; no Caddyfile subdirective; and undecided empty-`hosts` semantics. Its object-shaped JSON is also superseded: the config is still an object, but with `hosts` + `require_header`, and trust stays at the server level.

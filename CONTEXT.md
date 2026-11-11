@@ -34,7 +34,7 @@ Changing any of these is a design change, so update the ADR first.
 ## Verification
 
 ```bash
-GOTOOLCHAIN=go1.25.0 go vet ./... && GOTOOLCHAIN=go1.25.0 go test ./...
+GOTOOLCHAIN=go1.25.0 go vet ./... && GOTOOLCHAIN=go1.25.0 go test -race ./...
 ```
 
 The toolchain pin is local-only: Caddy 2.10.x panics on config load when built with Go 1.27+ (`encoding/json.RawMessage` became an alias of `jsontext.Value`, breaking Caddy's reflect-based module-map check). 2.11.x is unaffected, so no pin is needed there.
@@ -54,8 +54,9 @@ The integration test starts a real Caddy through `caddytest`, so `prepareRequest
 ## Traps
 
 - Hosts must be on one line. Repeated matcher lines merge only inside one named-matcher block (Caddy concatenates same-name matchers into a single token stream and `RemainingArgs` stops at end-of-line); on one line the module name parses as a host, and defining the same `@name` twice is a Caddyfile error. Pinned by adapter-level tests; the user-facing rule is documented in the README.
-- The host handed to `MatchHost` is lowercased first. In Caddy v2.10.2 a list over 100 entries is matched by a byte-wise exact lookup and the fallback loop stops at the first non-fuzzy entry, so exact entries bypass the case-insensitive comparison. Lowercasing buys case-insensitive matching for lowercase config entries; the trade-off is that on v2.10.2 an entry containing uppercase cannot match in such a list, even in identical case. v2.11.9 lowercases the request host and normalizes exact entries in `Provision`, so both forms match there. Pinned by `TestLargeListMatchesHostDelegation`. Only the matching value is lowercased; the published authority keeps its case.
+- The host handed to `MatchHost` is lowercased first, which keeps the over-100-entry exact-match path on v2.10.2 case-insensitive. The cost there is that a config entry containing uppercase cannot match such a list, even in identical case; v2.11.9 normalizes both sides. Pinned by `TestLargeListMatchesHostDelegation`, argued in ADR §5. Only the matching value is lowercased, the published authority keeps its case.
 - The shallow request copy does not escape, so it costs no allocation, only the struct copy. Do not replace it with a temporary mutation of `r.Host`; not modifying the request is part of the contract (ADR §5). `benchmark_test.go` measures the hot path, including the upstream `MatchHost` baseline this module delegates to.
 - Config entries must not carry a port: `MatchHost` strips ports on the request side only, so such an entry parses and never matches (pinned by a test).
 - Request-derived placeholders in the config are unsupported and unhardened: the replacer runs before the `*` check, so a request can inject a wildcard.
+- `Provision` passes the module's own `Hosts` slice to `MatchHost`, so the delegated provisioning normalizes it in place: IDNA conversion, lowercasing of exact entries on v2.11.9, and sorting once the list exceeds 100 entries. Nothing outside the module observes it (the admin API serves the stored configuration, not the provisioned struct, and a reload builds new instances from JSON), so the aliasing is left alone; do not assume `Hosts` keeps its input order or case after `Provision`.
 - User-facing behavior belongs in the README, internals and traps here, and argument in the ADR.
