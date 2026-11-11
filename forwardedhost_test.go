@@ -54,6 +54,16 @@ func wantErrContains(t *testing.T, err error, want string) {
 	}
 }
 
+// numberedHosts returns count hosts of the form h000.example.com, used to build
+// lists on either side of MatchHost's 100-entry fast-path threshold.
+func numberedHosts(count int) []string {
+	hosts := make([]string, count)
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("h%03d.example.com", i)
+	}
+	return hosts
+}
+
 func TestSelectForwardedHost(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -77,6 +87,8 @@ func TestSelectForwardedHost(t *testing.T) {
 		{name: "port kept", values: []string{"app.example.com:8443"}, want: "app.example.com:8443", state: forwardedPicked},
 		{name: "bracketed ipv6", values: []string{"[2001:db8::1]"}, want: "[2001:db8::1]", state: forwardedPicked},
 		{name: "bracketed ipv6 with port", values: []string{"[2001:db8::1]:8443"}, want: "[2001:db8::1]:8443", state: forwardedPicked},
+		{name: "bracketed ipv6 with junk suffix", values: []string{"[2001:db8::1]x"}, state: forwardedInvalid},
+		{name: "bracketed ipv6 with empty port", values: []string{"[2001:db8::1]:"}, state: forwardedInvalid},
 		{name: "unbracketed ipv6", values: []string{"2001:db8::1"}, state: forwardedInvalid},
 		{name: "bracketed ipv4", values: []string{"[1.2.3.4]"}, state: forwardedInvalid},
 		{name: "ipv6 zone", values: []string{"[fe80::1%eth0]"}, state: forwardedInvalid},
@@ -153,13 +165,22 @@ func TestProvision(t *testing.T) {
 		{name: "empty entry", hosts: []string{"app.example.com", ""}, wantErr: "empty host"},
 		{name: "wildcard inside label", hosts: []string{"*-app.example.com"}, wantErr: "whole label"},
 		{name: "duplicate host", hosts: []string{"app.example.com", "APP.example.com"}, wantErr: "repeated"},
-		{name: "malformed punycode", hosts: []string{"xn--0.pt"}, wantErr: "ASCII"},
+		{name: "malformed punycode", hosts: []string{"xn--0.pt"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := MatchForwardedHost{Hosts: tc.hosts}
-			wantErrContains(t, m.Provision(caddy.Context{}), tc.wantErr)
+			err := m.Provision(caddy.Context{})
+			if tc.wantErr == "" {
+				// The message is upstream's and may be reworded; only the rejection is
+				// this module's to pin.
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				return
+			}
+			wantErrContains(t, err, tc.wantErr)
 		})
 	}
 }
@@ -240,6 +261,38 @@ func TestMatchWithError(t *testing.T) {
 	}
 }
 
+func TestMatchAgreesWithMatchWithError(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   MatchForwardedHost
+		host  string
+		xfh   []string
+		trust any
+		want  bool
+	}{
+		{name: "trusted with valid xfh", cfg: MatchForwardedHost{Hosts: []string{"app.example.com"}}, host: "origin.internal", xfh: []string{"app.example.com"}, trust: true, want: true},
+		{name: "untrusted falls back to host", cfg: MatchForwardedHost{Hosts: []string{"origin.internal"}}, host: "origin.internal", xfh: []string{"app.example.com"}, trust: false, want: true},
+		{name: "trusted with invalid xfh", cfg: MatchForwardedHost{Hosts: []string{"origin.internal"}}, host: "origin.internal", xfh: []string{"a b"}, trust: true, want: false},
+		{name: "require_header without header", cfg: MatchForwardedHost{Hosts: []string{"origin.internal"}, RequireHeader: true}, host: "origin.internal", trust: true, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMatcher(t, tc.cfg)
+
+			// Fresh requests for each call: matching publishes a variable, so the two
+			// calls must start from the same request state.
+			matched, err := m.MatchWithError(newRequest(t, tc.host, tc.xfh, tc.trust))
+			if err != nil {
+				t.Fatalf("MatchWithError: %v", err)
+			}
+			if got := m.Match(newRequest(t, tc.host, tc.xfh, tc.trust)); got != matched || got != tc.want {
+				t.Fatalf("Match = %v, MatchWithError = %v, want %v", got, matched, tc.want)
+			}
+		})
+	}
+}
+
 func TestMatchFailureKeepsPreviousVar(t *testing.T) {
 	m := newMatcher(t, MatchForwardedHost{Hosts: []string{"app.example.com"}})
 	r := newRequest(t, "origin.internal", []string{"evil.example"}, true)
@@ -290,17 +343,13 @@ func TestModuleRegistration(t *testing.T) {
 }
 
 func TestCaseInsensitiveLargeList(t *testing.T) {
-	hosts := make([]string, 101)
-	for i := 0; i < 100; i++ {
-		hosts[i] = fmt.Sprintf("h%03d.example.com", i)
-	}
-	hosts[100] = "extra.example.com"
+	hosts := append(numberedHosts(100), "extra.example.com")
 	upper := strings.ToUpper(hosts[0])
 
 	// 100 entries do not use MatchHost's large-list fast path; 101 do.
 	// Provision mutates its slice, so each case gets its own copy.
 	for _, count := range []int{100, 101} {
-		m := newMatcher(t, MatchForwardedHost{Hosts: append([]string{}, hosts[:count]...)})
+		m := newMatcher(t, MatchForwardedHost{Hosts: slices.Clone(hosts[:count])})
 
 		trusted := newRequest(t, "origin.internal", []string{upper}, true)
 		if ok, err := m.MatchWithError(trusted); err != nil || !ok {
@@ -387,13 +436,9 @@ func TestLargeListMatchesHostDelegation(t *testing.T) {
 	// by dependency version (v2.10.2 keeps entries as written, v2.11.9 normalizes
 	// them), so the reference is provisioned independently instead of being inferred
 	// from our own provisioned field.
-	hosts := make([]string, 101)
-	for i := 0; i < 100; i++ {
-		hosts[i] = fmt.Sprintf("h%03d.example.com", i)
-	}
-	hosts[100] = "Mixed.Example.COM"
+	hosts := append(numberedHosts(100), "Mixed.Example.COM")
 
-	reference := caddyhttp.MatchHost(append([]string{}, hosts...))
+	reference := caddyhttp.MatchHost(slices.Clone(hosts))
 	if err := reference.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("provision reference: %v", err)
 	}

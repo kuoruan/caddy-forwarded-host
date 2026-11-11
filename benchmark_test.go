@@ -1,7 +1,7 @@
 package forwardedhost
 
 import (
-	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -51,20 +51,21 @@ func BenchmarkMatch(b *testing.B) {
 }
 
 func BenchmarkMatchLargeList(b *testing.B) {
-	hosts := make([]string, 1000)
-	for i := range hosts {
-		hosts[i] = fmt.Sprintf("h%04d.example.com", i)
-	}
-	last := hosts[len(hosts)-1]
+	const count = 1000
+	hosts := numberedHosts(count)
+	// Provision normalizes and sorts the list in place, so each scenario gets its own
+	// copy. The target host is read from the untouched template, so the sort cannot
+	// change which entry is targeted.
+	target := hosts[len(hosts)-1]
 
 	b.Run("Picked", func(b *testing.B) {
-		runBench(b, MatchForwardedHost{Hosts: hosts}, "origin.internal", []string{last}, true, true)
+		runBench(b, MatchForwardedHost{Hosts: slices.Clone(hosts)}, "origin.internal", []string{target}, true, true)
 	})
 	b.Run("Direct", func(b *testing.B) {
-		runBench(b, MatchForwardedHost{Hosts: hosts}, last, nil, true, true)
+		runBench(b, MatchForwardedHost{Hosts: slices.Clone(hosts)}, target, nil, true, true)
 	})
 	b.Run("NoMatch", func(b *testing.B) {
-		runBench(b, MatchForwardedHost{Hosts: hosts}, "origin.internal", []string{"absent.example.com"}, true, false)
+		runBench(b, MatchForwardedHost{Hosts: slices.Clone(hosts)}, "origin.internal", []string{"absent.example.com"}, true, false)
 	})
 }
 

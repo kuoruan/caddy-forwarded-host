@@ -1,7 +1,5 @@
-// Package forwardedhost provides a Caddy request matcher that routes by the
-// effective host of a request: the rightmost value of the last X-Forwarded-Host
-// field when the request comes from a trusted proxy, or from any peer when
-// TrustAnyPeer is set, otherwise the inbound Host.
+// Package forwardedhost implements the forwarded_host request matcher, which
+// routes by a request's effective host. See MatchForwardedHost.
 package forwardedhost
 
 import (
@@ -86,6 +84,14 @@ func (m *MatchForwardedHost) Provision(ctx caddy.Context) error {
 	return m.hosts.Provision(ctx)
 }
 
+// Match implements caddyhttp.RequestMatcher, which upstream asks matcher modules
+// to keep alongside MatchWithError for callers that still type-assert the older
+// interface. It drops the error; errors are reported through MatchWithError.
+func (m MatchForwardedHost) Match(r *http.Request) bool {
+	matched, _ := m.MatchWithError(r)
+	return matched
+}
+
 // MatchWithError implements caddyhttp.RequestMatcherWithError.
 func (m MatchForwardedHost) MatchWithError(r *http.Request) (bool, error) {
 	trusted, _ := caddyhttp.GetVar(r.Context(), caddyhttp.TrustedProxyVarKey).(bool)
@@ -110,13 +116,8 @@ func (m MatchForwardedHost) MatchWithError(r *http.Request) (bool, error) {
 		authority = selected
 	}
 
-	// Caddy v2.10.2 matches a list over 100 entries with a byte-wise exact lookup and
-	// stops the fallback loop at the first non-fuzzy entry, so exact entries bypass
-	// the case-insensitive comparison. Lowercasing here keeps config entries written
-	// in lowercase matchable in any request case; the trade-off is that on v2.10.2 an
-	// entry containing uppercase cannot match in such a list at all. v2.11.9 lowercases
-	// the request host and normalizes exact entries in Provision, so both work there.
-	// The published authority keeps its original case.
+	// Lowercased so the over-100-entry exact-match path on v2.10.2 stays
+	// case-insensitive; see ADR §5. The published authority keeps its case.
 	if matchHost := strings.ToLower(authority); matchHost != r.Host {
 		rr := *r
 		rr.Host = matchHost
@@ -192,10 +193,8 @@ func validAuthority(s string) bool {
 		if rest == "" {
 			return true
 		}
-		if !strings.HasPrefix(rest, ":") {
-			return false
-		}
-		return validPort(rest[1:])
+		port, ok := strings.CutPrefix(rest, ":")
+		return ok && validPort(port)
 	}
 
 	if strings.ContainsAny(s, "[]") {
@@ -211,9 +210,10 @@ func validAuthority(s string) bool {
 }
 
 func validPort(port string) bool {
-	// Five digits also rejects zero-padded values such as "000080", which
-	// ParseUint would otherwise read as 80.
-	if len(port) == 0 || len(port) > 5 {
+	// A port is at most five digits; the length check also rejects zero-padded
+	// values such as "000080", which ParseUint would otherwise read as 80.
+	// ParseUint rejects the empty string, so that needs no separate check.
+	if len(port) > 5 {
 		return false
 	}
 	n, err := strconv.ParseUint(port, 10, 16)

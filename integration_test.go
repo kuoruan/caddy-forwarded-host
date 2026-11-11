@@ -20,7 +20,7 @@ func TestIntegration(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	backendAddr := strings.TrimPrefix(backend.URL, "http://")
+	backendAddr := backend.Listener.Addr().String()
 
 	// trusted_proxies is configured for :9081 only, so the same request on
 	// :9082 must fall back to the inbound Host. :9083 has no trusted_proxies
