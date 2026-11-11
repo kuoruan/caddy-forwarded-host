@@ -2,13 +2,13 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A Caddy request matcher that routes by the effective host of a request: by default the `X-Forwarded-Host` value when the request comes from a trusted proxy, otherwise the inbound `Host`. The opt-in `trust_any_peer` accepts the header from any peer.
+A Caddy request matcher that routes requests within a site by the `X-Forwarded-Host` value from trusted proxies, and matches direct traffic on the inbound `Host` by default.
 
 Useful when a CDN or edge proxy (Cloudflare Workers, a load balancer, another Caddy) forwards requests for many public hostnames to a single origin hostname, and routing has to follow the public hostname without trusting values a client can set.
 
 ## Relation to the built-in `header` matcher
 
-`@app header X-Forwarded-Host app.example.com` trusts the header unconditionally. `X-Forwarded-Host` is a plain client-supplied header: any client that can reach the origin directly can set it. By default this module only uses it when Caddy has already decided the peer is a trusted proxy, using the server's existing [`trusted_proxies`](https://caddyserver.com/docs/caddyfile/options#trusted-proxies) option. This adds no extra trust configuration and no second source of truth; the `trust_any_peer` exemption described below must be enabled explicitly.
+`@app header X-Forwarded-Host app.example.com` trusts the header unconditionally. Any client that can reach the origin directly can set `X-Forwarded-Host`. By default this module uses it only when Caddy has already decided the peer is a trusted proxy, reusing the server's [`trusted_proxies`](https://caddyserver.com/docs/caddyfile/options#trusted-proxies) option; no separate trust configuration is involved. The `trust_any_peer` exemption described below must be enabled explicitly.
 
 ## Install
 
@@ -18,7 +18,7 @@ xcaddy build --with github.com/kuoruan/caddy-forwarded-host
 
 ## Prerequisites
 
-- The peer must be listed in the server's `trusted_proxies`; that option is the default trust model. Without it the matcher behaves like the built-in `host` matcher, which is a valid configuration. The only exception is `trust_any_peer`, described in [Bypassing the peer check](#bypassing-the-peer-check).
+- The peer must be listed in the server's `trusted_proxies`. Without it the matcher behaves like the built-in `host` matcher, which is a valid configuration. The only exception is `trust_any_peer`, described in [Bypassing the peer check](#bypassing-the-peer-check).
 - The request still has to enter a site block, and site blocks are selected by the inbound `Host`, not by `X-Forwarded-Host`. The site address must therefore cover the host sent by clients (see [Boundaries](#boundaries)).
 
 ## Usage
@@ -44,7 +44,7 @@ origin.example.com {
 }
 ```
 
-Host lists and wildcards follow the same rules as the built-in `host` matcher: wildcards must occupy a whole label, placeholders are supported, matching is case-insensitive, and a port carried by the *request* is ignored. Configured hosts should omit ports. Entries containing ports are accepted but never match, as with the built-in matcher.
+Host lists and wildcards follow the same rules as the built-in `host` matcher: wildcards must occupy a whole label, placeholders are supported, matching is case-insensitive, and a port carried by the *request* is ignored. Configured hosts should omit ports: entries containing one are accepted but never match.
 
 ```caddyfile
 @app forwarded_host app.example.com app2.example.com
@@ -68,14 +68,14 @@ handle @apps {
 
 `{http.vars.forwarded_host}` is the authority that was actually used for matching: the `X-Forwarded-Host` value when the peer is trusted or `trust_any_peer` is on, otherwise the inbound `Host`. It keeps the port.
 
-- It is only set when this matcher matched: use it inside that route. Referenced from a catch-all route it is empty, or still holds the value from an earlier successful match in the same request. `header_up Host` with an empty value makes Go fall back to the upstream address, so the backend receives `127.0.0.1:8081`, not the public host.
+- It is only set when this matcher matches: use it inside that route. Referenced from a catch-all route it is empty, or still holds the value from an earlier successful match in the same request. `header_up Host` with an empty value makes Go fall back to the upstream address, so the backend receives `127.0.0.1:8081`, not the public host.
 - It can be overwritten by a `vars` directive later in the same route, and a `vars` matcher must not read it from the same matcher set (matcher order inside a set is not deterministic).
-- Wrapping the matcher in `not` still publishes it when the inner match succeeds: the negation happens after this module ran.
+- Wrapping the matcher in `not` still publishes it when the inner match succeeds: the negation happens after this matcher has run.
 - It is a reflection of the request, not an authorization decision.
 
 ### Strict mode
 
-By default a request without a usable `X-Forwarded-Host` falls back to the inbound `Host`, which supports deployments where one site block serves both direct and proxied traffic. Add `require_header` to accept only requests that came through a trusted proxy *and* carried a valid `X-Forwarded-Host` (with `trust_any_peer` on, only the header condition applies):
+By default, a request with no `X-Forwarded-Host` or only blank values falls back to the inbound `Host`, which supports deployments where one site block serves both direct and proxied traffic. Add `require_header` to accept only requests that came through a trusted proxy *and* carried a valid `X-Forwarded-Host` (with `trust_any_peer` on, only the header condition applies):
 
 ```caddyfile
 @app forwarded_host app.example.com {
@@ -107,7 +107,7 @@ If the origin is reachable only through the proxy, the proxy address may not be 
 
 It affects this matcher only. `client_ip`, the access log and `reverse_proxy` keep the verdict the server computed from `trusted_proxies`, and that verdict is never written back.
 
-The flag delegates the routing decision to any client that can connect: any client can send `X-Forwarded-Host` and select a route this matcher allows; the authority checks only reject malformed values. Enable it only when ingress is restricted to the proxy by something a client cannot forge, such as firewall rules, socket file permissions or an authenticating sidecar, and when the proxy overwrites any client-supplied `X-Forwarded-Host` instead of passing it through. A listener on a private network is not sufficient, because every other host on that network can forge the header. Listing the proxy ranges remains the recommended configuration.
+The flag lets any client that can connect select a route matched by this matcher by sending `X-Forwarded-Host`; the value checks only reject malformed input. Enable it only when ingress is restricted to the proxy by something a client cannot forge, such as firewall rules, socket file permissions or an authenticating sidecar, and when the proxy overwrites any client-supplied `X-Forwarded-Host` instead of passing it through. A listener on a private network is not sufficient, because every other host on that network can forge the header. Listing the proxy ranges remains the recommended configuration.
 
 With the flag on the peer no longer matters, so `require_header` reduces to "a valid `X-Forwarded-Host` must be present":
 
@@ -152,7 +152,7 @@ origin.example.com {
 }
 ```
 
-This uses one site block and one certificate for `origin.example.com`; the matcher derives the tenant hostname from the `X-Forwarded-Host` written by the trusted proxy and passes it to the backend as `Host`.
+The origin needs one site block and one certificate for `origin.example.com`; the backend receives the tenant hostname as `Host`.
 
 ### Cloudflare Worker that rewrites `Host`
 
@@ -221,13 +221,12 @@ a.example.com, b.example.com {
 }
 ```
 
-If no logic depends on which hostname was used, a site-address list is sufficient. This matcher adds a dependency on `trusted_proxies` and does not enable direct access to a third hostname, because it cannot change site selection.
+If no logic depends on which hostname was used, a site-address list is sufficient. Using it adds an implicit dependency on `trusted_proxies` and does not enable direct access to a third hostname, because it cannot change site selection.
 
 ## Boundaries
 
-- Site-block selection and TLS certificates still use the inbound `Host` and SNI. The matcher decides routing only inside an already selected site block. Serving `app.example.com` directly requires the site address to cover it (`*.example.com` or a list), which usually means a wildcard certificate obtained with the DNS-01 challenge.
+- This matcher only selects routes within an already selected site block; it does not change site selection or TLS certificate configuration. Serving `app.example.com` directly requires the site address to cover it (`*.example.com` or a list), usually with a DNS-01 wildcard certificate.
 - It does not rewrite `r.Host`; use `header_up Host {http.vars.forwarded_host}` (or a literal) to change what the backend sees.
-- `trust_any_peer` takes the trust decision away from `trusted_proxies` for this matcher: a client that can reach the origin chooses the route, and the authority checks only reject malformed values.
 - It is not an authorization mechanism. Trusting Cloudflare's ranges does not imply trusting the value a Worker writes into the header; `require_header` does not protect against a proxy that passes a client-supplied `X-Forwarded-Host` through.
 - Only `X-Forwarded-Host` is handled. `X-Forwarded-For` belongs to `trusted_proxies` / `client_ip`; `X-Forwarded-Proto` does not affect host matching and does not restore TLS/SNI.
 - Placeholders in the host list are intended for static sources (environment or configuration). A request-derived placeholder such as `forwarded_host {http.request.header.X-Tenant-Host}` lets the request inject a wildcard into the matcher; that usage is unsupported and unhardened.

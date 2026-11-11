@@ -2,13 +2,13 @@
 
 [English](README.md) | 简体中文
 
-一个 Caddy 请求匹配器，按请求的有效主机路由：默认在请求来自可信代理时用 `X-Forwarded-Host`，否则用入站 `Host`；可选开启的 `trust_any_peer` 允许接受任意来源的这个头。
+Caddy 请求匹配器：在站点内按可信代理提供的 `X-Forwarded-Host` 分流请求，直连流量默认按收到的 `Host` 匹配。
 
-适用于 CDN 或边缘代理（Cloudflare Workers、负载均衡、另一个 Caddy）把许多公网域名转发到同一个源站域名，而需要按公网域名分流、又不采信客户端可伪造的值的场景。
+适合以下场景：CDN 或边缘代理（Cloudflare Workers、负载均衡器、另一台 Caddy）将多个公网域名转发到同一个源站，路由需要按公网域名区分，同时不能采信客户端可以自行设置的请求头。
 
 ## 与内置 `header` 匹配器的关系
 
-`@app header X-Forwarded-Host app.example.com` 会无条件采信这个头。`X-Forwarded-Host` 是普通客户端可设置的请求头，任何能直连源站的人都能伪造。默认情况下本模块只在 Caddy 已经判定对端是可信代理时才使用它，复用 server 现有的 [`trusted_proxies`](https://caddyserver.com/docs/caddyfile/options#trusted-proxies) 配置，不引入第二套信任边界；下文提到的 `trust_any_peer` 例外必须显式开启。
+`@app header X-Forwarded-Host app.example.com` 不检查来源，直接采信这个请求头。但任何能直连源站的客户端都能自行设置 `X-Forwarded-Host`。本模块默认只在 Caddy 已判定对端是可信代理时使用它，复用现有的 [`trusted_proxies`](https://caddyserver.com/docs/caddyfile/options#trusted-proxies) 配置，不另设一套信任配置。下文提到的 `trust_any_peer` 是唯一的例外，必须显式开启。
 
 ## 安装
 
@@ -18,12 +18,12 @@ xcaddy build --with github.com/kuoruan/caddy-forwarded-host
 
 ## 前置条件
 
-- 代理地址必须写进 server 的 `trusted_proxies`，该选项即默认的信任模型。没有它时，本模块的行为等同于内置 `host` 匹配器。这是有效配置。唯一的例外是 `trust_any_peer`，见[绕过对端检查](#绕过对端检查)。
-- 请求仍然要先进入某个站点块，而站点块是按入站 `Host` 选择的，不是按 `X-Forwarded-Host`。因此站点地址必须覆盖客户端实际发送的主机（见[边界](#边界)）。
+- `trusted_proxies` 中必须包含代理的地址。不配置也可以使用，此时本模块的行为与内置 `host` 匹配器一致，同样是一种有效配置。唯一的例外是 `trust_any_peer`，见[绕过对端检查](#绕过对端检查)。
+- 请求仍然必须先匹配到某个站点块，而站点块按入站 `Host` 选择，不参考 `X-Forwarded-Host`。因此站点地址必须覆盖客户端实际发送的主机名（见[边界](#边界)）。
 
 ## 用法
 
-没有站点地址的代码块都是片段，需要放进站点块中使用。
+本文中不带站点地址的代码块都是片段，需要放入站点块内使用。
 
 ```caddyfile
 {
@@ -44,17 +44,17 @@ origin.example.com {
 }
 ```
 
-主机名列表与通配符的规则跟内置 `host` 匹配器一致：通配符必须占满整个标签，支持占位符，比较不区分大小写，请求携带的端口会被忽略。配置中的主机名不应包含端口。此类配置可以解析，但不会匹配，与内置匹配器相同。
+主机名列表和通配符沿用内置 `host` 匹配器的规则：通配符必须占满整个标签，支持占位符，比较不区分大小写，请求携带的端口会被忽略。配置中的主机名不要包含端口：带端口的条目可以正常加载，但永远不会匹配。
 
 ```caddyfile
 @app forwarded_host app.example.com app2.example.com
 ```
 
-取值规则：取最后一个 `X-Forwarded-Host` 字段里最右的逗号分隔项（即距离本服务器最近的一跳写入的值）。若该项为空或不是合法的 `host[:port]`，请求即不匹配。它不会向左寻找其他值，也不会回退到入站 `Host`。
+取值只看最后一个 `X-Forwarded-Host` 字段中按逗号分隔后最右侧的一项，即距离本机最近的一跳写入的值。这一项为空或不是合法的 `host[:port]` 时，请求不匹配。不会向左查找其他值，也不会回退到入站 `Host`。
 
-### 把命中的主机写给后端
+### 把命中的主机名传给后端
 
-除非配置另行指定，后端收到的仍是源站 `Host`。当命中的主机只能在运行期确定（`*.example.com` 或列表）时，引用本匹配器在成功匹配后发布的变量：
+除非配置另行修改，后端收到的是源站 `Host`。如果命中的主机名只能在运行时确定（`*.example.com` 或列表），可以引用本匹配器在匹配成功后设置的变量：
 
 ```caddyfile
 @apps forwarded_host *.example.com
@@ -66,16 +66,16 @@ handle @apps {
 }
 ```
 
-`{http.vars.forwarded_host}` 即本次实际用于匹配的 authority：对端可信（或开启 `trust_any_peer`）时是 `X-Forwarded-Host` 的值，否则是入站 `Host`，端口会保留。
+`{http.vars.forwarded_host}` 是本次匹配实际使用的主机名和端口（如有）：对端可信（或开启了 `trust_any_peer`）时取自 `X-Forwarded-Host`，否则取自入站 `Host`，端口原样保留。
 
-- 只在本匹配器命中时才有值，因此只能在该路由中使用。在 catch-all 路由里引用，它是空的，或者仍是同一请求中更早一次成功匹配留下的值。空值交给 `header_up Host` 时，Go 会回退到上游地址，后端收到的是 `127.0.0.1:8081` 这样的上游地址。
-- 同一条路由里后面的 `vars` 指令可以覆盖它；`vars` 匹配器不能在同一 matcher set 里读它（set 内匹配器的求值顺序不确定）。
-- 用 `not` 包裹这个匹配器时，内部匹配成功仍然会发布变量。取反发生在本模块运行之后。
-- 它是请求的回显，不是授权判断。
+- 只有本匹配器匹配成功时才会写入，因此只能在这条路由内使用。在兜底路由（catch-all）中读取时，它是空的，或者仍保留同一请求中上一次匹配成功写入的值。把空值传给 `header_up Host` 后，Go 会回退到上游地址，后端收到的是 `127.0.0.1:8081` 这类值，而不是公网域名。
+- 同一条路由中后续的 `vars` 指令可以覆盖它；但 `vars` 匹配器不能与它在同一个匹配器集合中读取，集合内各匹配器的执行顺序没有保证。
+- 用 `not` 包裹这个匹配器时，内部匹配成功仍会写入这个变量，因为取反发生在本模块执行之后。
+- 它只是反映请求中已有的值，不能作为授权依据。
 
 ### 严格模式
 
-默认情况下，没有可用 `X-Forwarded-Host` 的请求会回退到入站 `Host`，该行为适用于同一个站点块同时服务直连与代理流量的部署。加上 `require_header` 后，只接受「来自可信代理且携带有效 `X-Forwarded-Host`」的请求（开启 `trust_any_peer` 时仅保留对 `X-Forwarded-Host` 的条件）：
+默认情况下，请求未携带 `X-Forwarded-Host`，或该头全为空白时，会回退到入站 `Host`，因此同一个站点块可以同时服务直连和代理流量。加上 `require_header` 后，只接受来自可信代理且携带有效 `X-Forwarded-Host` 的请求（开启 `trust_any_peer` 后只剩后一个条件）：
 
 ```caddyfile
 @app forwarded_host app.example.com {
@@ -83,21 +83,21 @@ handle @apps {
 }
 ```
 
-主机名写在匹配器所在行；块内接受 `require_header` 与 `trust_any_peer`。
+主机名写在匹配器所在行，块内只接受 `require_header` 和 `trust_any_peer`。
 
 | 请求情况 | 默认 | `require_header` |
 | --- | --- | --- |
-| 对端不可信，无论头内容 | 按 `Host` 匹配 | 不匹配 |
-| 对端可信，头缺失或全空白 | 按 `Host` 匹配 | 不匹配 |
+| 对端不可信，头内容任意 | 按 `Host` 匹配 | 不匹配 |
+| 对端可信，头缺失或全为空白 | 按 `Host` 匹配 | 不匹配 |
 | 对端可信，头有效 | 按该值匹配 | 按该值匹配 |
-| 对端可信，头有效但未命中 | 不匹配（不回退 `Host`）| 不匹配 |
+| 对端可信，头有效但未匹配 | 不匹配，不回退 `Host` | 不匹配 |
 | 对端可信，头有内容但无效 | 不匹配 | 不匹配 |
 
-上表假设 `trust_any_peer` 未开启；开启后「对端不可信」的行按可信处理（见[绕过对端检查](#绕过对端检查)）。
+上表假设 `trust_any_peer` 未开启；开启后，「对端不可信」对应的行按可信处理（见[绕过对端检查](#绕过对端检查)）。
 
 ### 绕过对端检查
 
-若源站只能经代理访问，代理地址可能无法写成网段，出口地址也可能变化。`trust_any_peer` 让本匹配器对任何对端都采信 `X-Forwarded-Host`：
+如果源站只允许代理访问，而代理地址无法写成网段（例如出口地址会变化），可以使用 `trust_any_peer`。开启后，匹配器不再检查对端来源，一律采用 `X-Forwarded-Host`：
 
 ```caddyfile
 @app forwarded_host *.example.com {
@@ -105,17 +105,17 @@ handle @apps {
 }
 ```
 
-它只影响本匹配器。`client_ip`、访问日志和 `reverse_proxy` 仍使用 server 依据 `trusted_proxies` 算出的判定，该判定不会被改写。
+它只影响本匹配器。`client_ip`、访问日志和 `reverse_proxy` 仍然沿用 Caddy 根据 `trusted_proxies` 得出的判断，本模块不会把这个判断写回去。
 
-该选项把路由决定交给任何能建立连接的客户端：任何客户端发送 `X-Forwarded-Host` 即可选中本匹配器允许的某条路由，authority 校验只能拒绝格式非法的值。仅当入口由客户端无法伪造的手段限制在代理上时才应开启，例如防火墙规则、socket 文件权限或带认证的 sidecar，并且代理必须覆写客户端自带的 `X-Forwarded-Host`，不得原样透传。仅监听在私网地址上并不充分，同网段的其他主机同样可以伪造该头。列出代理网段仍是推荐配置。
+开启这个选项后，任何能建立连接的客户端都可以通过设置 `X-Forwarded-Host` 来选择本匹配器覆盖的某条路由；值校验只能拒绝格式不合法的值。只有在入口被客户端无法伪造的手段限制为仅允许代理访问时才应开启，例如防火墙规则、socket 文件权限或带认证的 sidecar；同时代理必须覆写客户端自带的 `X-Forwarded-Host`，不能原样透传。仅监听私网地址并不充分，同网段的其他主机同样能伪造这个请求头。能列出代理网段时，配置网段仍是更稳妥的做法。
 
-开启后对端不再参与判断，`require_header` 只保留「必须携带有效的 `X-Forwarded-Host`」这一条件：
+开启后对端不再参与判断，`require_header` 只剩「必须携带有效的 `X-Forwarded-Host`」这一个条件：
 
 | 开启 `trust_any_peer` 时 | 默认 | `require_header` |
 | --- | --- | --- |
-| 头缺失或全空白 | 按 `Host` 匹配 | 不匹配 |
+| 头缺失或全为空白 | 按 `Host` 匹配 | 不匹配 |
 | 头有效 | 按该值匹配 | 按该值匹配 |
-| 头有效但未命中 | 不匹配（不回退 `Host`）| 不匹配 |
+| 头有效但未匹配 | 不匹配，不回退 `Host` | 不匹配 |
 | 头有内容但无效 | 不匹配 | 不匹配 |
 
 ### JSON
@@ -128,13 +128,13 @@ handle @apps {
 }
 ```
 
-需要严格模式时加 `"require_header": true`；要接受任意来源的头，加 `"trust_any_peer": true`。
+需要严格模式时加上 `"require_header": true`；需要接受任意来源的请求头时加上 `"trust_any_peer": true`。
 
 ## 使用场景
 
 ### 多个公网域名，一个源站
 
-代理把许多租户域名转发到同一个源站域名，租户名单只有运行期才知道，而给每个租户签证书不可行。
+代理将多个租户域名转发到同一个源站，租户名单只在运行时才能确定，而给每个租户单独签发证书并不可行。
 
 ```caddyfile
 origin.example.com {
@@ -152,11 +152,11 @@ origin.example.com {
 }
 ```
 
-该配置使用一个站点块和一张 `origin.example.com` 证书；匹配器根据可信代理写入的 `X-Forwarded-Host` 确定租户主机名，并通过 `Host` 传递给后端。
+这样只需要一个站点块和一张 `origin.example.com` 的证书；后端收到的 `Host` 就是租户主机名。
 
-### 改写 `Host` 的 Cloudflare Worker
+### 用 Cloudflare Worker 改写 `Host`
 
-Worker 把 `Host` 覆写成源站域名，原域名只留在单个 `X-Forwarded-Host` 值里。把 Cloudflare 的网段写进 `trusted_proxies`（也可以用 `http.ip_sources.cloudflare` 提供，来自 [`github.com/WeidiDeng/caddy-cloudflare-ip`](https://github.com/WeidiDeng/caddy-cloudflare-ip)，代价是多一个构建依赖），然后按第一个示例匹配公网域名。
+Worker 会把 `Host` 改写为源站域名，原域名只保留在单个 `X-Forwarded-Host` 中。把 Cloudflare 的网段加入 `trusted_proxies`（也可以由 `http.ip_sources.cloudflare` 提供，来自 [`github.com/WeidiDeng/caddy-cloudflare-ip`](https://github.com/WeidiDeng/caddy-cloudflare-ip)，代价是多一个构建依赖），然后按第一个示例匹配公网域名。
 
 ### 迁移：新旧域名并存
 
@@ -169,9 +169,9 @@ handle @both {
 }
 ```
 
-两个域名路由到同一后端，各自保留自己的 `Host`；下线旧域名只需修改一个 token，无需复制路由。
+两个域名都转发到同一个后端，各自保留自己的 `Host`；下线旧域名时只需修改一个值，不必复制一份路由。
 
-### 按公网域名分到不同后端
+### 按公网域名分流到不同后端
 
 ```caddyfile
 origin.example.com {
@@ -191,18 +191,18 @@ origin.example.com {
 }
 ```
 
-分流依据是通过信任检查的值，灰度、蓝绿或按应用分流只需替换 `handle` 块，无需改动证书和站点地址。
+分流依据是通过信任检查的值。灰度、蓝绿或按应用拆分时，只需替换 `handle` 块，证书和站点地址都不必改动。
 
-### 同一站点块里直连与代理共存
+### 同一站点内直连与代理并存
 
 ```caddyfile
-# 直连访客照常工作：入站 Host 即公网域名。
+# 直连访客照常可用：入站 Host 就是公网域名。
 @direct forwarded_host app.example.com
 handle @direct {
 	reverse_proxy 127.0.0.1:8081
 }
 
-# 仅接受代理流量：要求对端可信且 X-Forwarded-Host 有效。
+# 只放行代理流量：要求对端可信且 X-Forwarded-Host 有效。
 @proxied forwarded_host app.example.com {
 	require_header
 }
@@ -211,9 +211,9 @@ handle @proxied {
 }
 ```
 
-仅对绝不允许被直连的域名启用 `require_header`。
+只对绝不允许直连的域名启用 `require_header`。
 
-### 非适用场景：多个域名、同一后端、无需分流
+### 不适用场景：多个域名共用一个后端，无需分流
 
 ```caddyfile
 a.example.com, b.example.com {
@@ -221,29 +221,28 @@ a.example.com, b.example.com {
 }
 ```
 
-如果没有任何逻辑依赖实际使用的域名，站点地址列表即可满足。引入本模块会增加一条对 `trusted_proxies` 的隐性依赖，且无法让第三个域名支持直连，因为它无法改变站点选择。
+如果没有任何逻辑依赖实际使用的域名，站点地址列表就足够。使用本模块会让配置隐含一层对 `trusted_proxies` 的依赖，也无法让第三个域名支持直连，因为它改变不了站点选择。
 
 ## 边界
 
-- 站点块选择与 TLS 证书仍按入站 `Host` 和 SNI 决定。本匹配器仅在已选定的站点块内部决定路由。若希望 `app.example.com` 也能被直连访问，站点地址必须覆盖它（`*.example.com` 或域名列表），通常意味着需要用 DNS-01 签发泛域名证书。
-- 它不会改写 `r.Host`；要改变后端看到的值，用 `header_up Host {http.vars.forwarded_host}`（或字面量）。
-- `trust_any_peer` 使本匹配器不再采用 `trusted_proxies` 的判定：能连到源站的客户端即可自行选择路由，authority 校验只能拒绝格式非法的值。
-- 它不是授权机制。信任 Cloudflare 的网段并不代表信任 Worker 写入该头的值；若代理将客户端自带的 `X-Forwarded-Host` 原样透传，`require_header` 无法拦截。
-- 只处理 `X-Forwarded-Host`。`X-Forwarded-For` 归 `trusted_proxies` / `client_ip`；`X-Forwarded-Proto` 与主机匹配无关，也不会还原 TLS/SNI。
-- 主机名里的占位符只适用于静态来源（环境变量或配置文件）。请求派生的占位符，例如 `forwarded_host {http.request.header.X-Tenant-Host}`，会让请求把通配符注入匹配器；该用法不受支持，也未做加固。
-- 带尾点的 FQDN（`app.example.com.`）能通过校验，但不命中 `app.example.com`，也不会回退 `Host`。
-- 静态文件服务与共享缓存的键是 `Host` + URL，而不是 `X-Forwarded-Host`：如果响应会被多个主机共享，需要发 `Vary: X-Forwarded-Host` 或关闭缓存。
+- 本匹配器只在已选中的站点块内决定路由，不改变站点选择或 TLS 证书配置。想让 `app.example.com` 也能直连，站点地址就必须覆盖它（`*.example.com` 或域名列表），通常意味着需要通过 DNS-01 签发泛域名证书。
+- 它不会改写 `r.Host`。要让后端看到其他值，请使用 `header_up Host {http.vars.forwarded_host}`（或指定固定值）。
+- 它不是授权机制。信任 Cloudflare 的网段并不等于信任 Worker 写入这个请求头的值；如果代理将客户端自带的 `X-Forwarded-Host` 原样透传，`require_header` 也无法拦截。
+- 只处理 `X-Forwarded-Host`。`X-Forwarded-For` 由 `trusted_proxies` / `client_ip` 负责；`X-Forwarded-Proto` 与主机匹配无关，也不会还原 TLS/SNI。
+- 主机名中的占位符只适合静态来源（环境变量或配置文件）。请求派生的占位符，例如 `forwarded_host {http.request.header.X-Tenant-Host}`，等于允许请求向匹配器中注入通配符；这种用法不受支持，也未做加固。
+- 带尾点的 FQDN（`app.example.com.`）可以通过校验，但不会匹配 `app.example.com`，也不会回退到 `Host`。
+- 静态文件服务和共享缓存的键是 `Host` + URL，而不是 `X-Forwarded-Host`。如果响应会在多个主机之间共享，需要发送 `Vary: X-Forwarded-Host`，或者关闭缓存。
 
-## 排查
+## 故障排查
 
-「对端可信、`X-Forwarded-Host` 存在但无效」很难发现：匹配器不回退，请求表现为普通 404，模块本身不输出任何日志。缩小范围的步骤：
+「对端可信、`X-Forwarded-Host` 有内容但不合法」的情况最难排查：匹配器不回退，请求会表现为普通的 404，模块本身也不输出日志。可以按以下步骤缩小范围：
 
-1. 从 `trusted_proxies` 内的地址带上头发一次请求（本地测试时把自己的地址临时加进去）：`curl -H 'Host: origin.example.com' -H 'X-Forwarded-Host: app.example.com' https://origin.example.com/`
-2. 看 Caddy 的访问日志。请求头会记录在里面，每条日志还记录了处理该请求的站点块。
-3. 与「去掉这个头」的同一请求对比：如果该请求命中，则问题出在头的值上（最右项为空、带尾点，或完整 URL 这类非 authority 值）。
+1. 从 `trusted_proxies` 内的地址发送一个带有这个请求头的请求（本地测试时可以临时加入自己使用的地址）：`curl -H 'Host: origin.example.com' -H 'X-Forwarded-Host: app.example.com' https://origin.example.com/`
+2. 查看 Caddy 的访问日志。请求头会记录在日志中，每条日志也会记录处理这个请求的站点块。
+3. 再发送一次不带这个请求头的相同请求作为对照：如果这次能够匹配，问题就出在请求头的值上（最右一项为空、带尾点，或是完整 URL 这类不是 `host[:port]` 的值）。
 
 ## 兼容范围
 
-构建基线为 Caddy v2.10.2（Go 1.25），实测版本为 v2.11.9。
+构建基线为 Caddy v2.10.2（Go 1.25），已在 v2.11.9 上实测通过。
 
-用 Go 1.27+ 构建的 Caddy 2.10.x 无法加载任何配置，原因是上游 `encoding/json` 的变更（`json.RawMessage` 变成了别名）。在 Go 1.27+ 上请用 Caddy 2.11.x，或用 Go 1.25/1.26 构建 2.10.x。细节见 [CONTEXT.md](CONTEXT.md)。
+使用 Go 1.27+ 构建的 Caddy 2.10.x 无法加载任何配置，原因是上游 `encoding/json` 的改动（`json.RawMessage` 成为别名）。在 Go 1.27+ 上请使用 Caddy 2.11.x，或改用 Go 1.25/1.26 构建 2.10.x。细节见 [CONTEXT.md](CONTEXT.md)。
